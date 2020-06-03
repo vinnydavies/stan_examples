@@ -177,8 +177,6 @@ plot(fit,pars=c('theta'))
 
 ######### Gaussian Process Example #######
 
-##### Simulate some data
-
 N = 100
 x <- sort(runif(N, 0, 10))
 beta <- c(0,0.1,0.2,-0.02, 0.00001)
@@ -189,59 +187,96 @@ plot(x,y)
 lines(x,y_true)
 gp_data = list(N=N, y=y, x=x)
 
+##### Convert Data to lists
+
+N_predict <- N
+x_predict <- x
+y_predict <- y_true
+
+stan_rdump(c("N", "x", "y",
+             "N_predict", "x_predict", "y_predict",
+             "sample_idx"), file="gp.data.R")
+
+data <- read_rdump('gp.data.R')
+
 ##### Model
 
 gp_model <- "
- data {
-  int<lower=1> N;
-  real x[N];
-  vector[N] y;
-}
-transformed data {
-  vector[N] mu = rep_vector(0, N);
-}
-parameters {
-  real<lower=0> rho;
-  real<lower=0> alpha;
-  real<lower=0> sigma;
-}
-model {
-  matrix[N, N] L_K;
-  matrix[N, N] K = cov_exp_quad(x, alpha, rho);
-  real sq_sigma = square(sigma);
-
-  // diagonal elements
-  for (n in 1:N)
-    K[n, n] = K[n, n] + sq_sigma;
-
-  L_K = cholesky_decompose(K);
-
-  rho ~ inv_gamma(5, 5);
-  alpha ~ std_normal();
-  sigma ~ std_normal();
-
-  y ~ multi_normal_cholesky(mu, L_K);
-}
+  functions {
+    vector gp_pred_rng(real[] x2,
+                       vector y1, real[] x1,
+                       real alpha, real rho, real sigma, real delta) {
+      int N1 = rows(y1);
+      int N2 = size(x2);
+      vector[N2] f2;
+      {
+        matrix[N1, N1] K =   cov_exp_quad(x1, alpha, rho)
+                           + diag_matrix(rep_vector(square(sigma), N1));
+        matrix[N1, N1] L_K = cholesky_decompose(K);
+  
+        vector[N1] L_K_div_y1 = mdivide_left_tri_low(L_K, y1);
+        vector[N1] K_div_y1 = mdivide_right_tri_low(L_K_div_y1', L_K)';
+        matrix[N1, N2] k_x1_x2 = cov_exp_quad(x1, x2, alpha, rho);
+        vector[N2] f2_mu = (k_x1_x2' * K_div_y1);
+        matrix[N1, N2] v_pred = mdivide_left_tri_low(L_K, k_x1_x2);
+        matrix[N2, N2] cov_f2 =   cov_exp_quad(x2, alpha, rho) - v_pred' * v_pred
+                                + diag_matrix(rep_vector(delta, N2));
+        f2 = multi_normal_rng(f2_mu, cov_f2);
+      }
+      return f2;
+    }
+  }
+  
+  data {
+    int<lower=1> N;
+    real x[N];
+    vector[N] y;
+  
+    int<lower=1> N_predict;
+    real x_predict[N_predict];
+  }
+  
+  parameters {
+    real<lower=0> rho;
+    real<lower=0> alpha;
+    real<lower=0> sigma;
+  }
+  
+  model {
+    matrix[N, N] cov =   cov_exp_quad(x, alpha, rho)
+                       + diag_matrix(rep_vector(square(sigma), N));
+    matrix[N, N] L_cov = cholesky_decompose(cov);
+  
+    rho ~ normal(0, 20.0 / 3);
+    alpha ~ normal(0, 2);
+    sigma ~ normal(0, 1);
+    y ~ multi_normal_cholesky(rep_vector(0, N), L_cov);
+  }
+  
+  generated quantities {
+    vector[N_predict] f_predict = gp_pred_rng(x_predict, y, x, alpha, rho, sigma, 1e-10);
+    vector[N_predict] y_predict;
+    for (n in 1:N_predict)
+      y_predict[n] = normal_rng(f_predict[n], sigma);
+  }
 "
 
-##### sample from model
-
-fit <- stan(model_code = gp_model, model_name = "example",
-            data = gp_data, iter = 2012, chains = 3, sample_file = 'norm.csv',
-            verbose = TRUE)
+fit <- stan(model_code=gp_model, data=data, seed=5838298)
 print(fit)
 
-f_total <- extract(fit)$f[1,]
-y_total <- extract(fit)$y[1,]
+###### Plot Results
 
-true_realization <- data.frame(f_total, x_total)
+# plot leaves a lot to be desired, sorry!
+f_out <- extract(fit)$f_predict
 
-##### Optimisation
-
-opt_fit <- optimizing(gp_model, data=gp_data, seed=5838298, hessian=FALSE)
-
-###### Draw Sample from the Posterior of Gaussian Process
-
+plot(x, y_true, type="l", lwd=2, xlab="x", ylab="y",
+     xlim=c(0, 10), ylim=c(0, 4))
+for(i in 1:ncol(f_out)){
+  lines(x, f_out[i,], type='l', col='red')
+}
+lines(x, y_true, lwd=4)
+points(x, y, col="white", pch=16, cex=1.5)
+points(x, y, col="black", pch=16, cex=1.3)
 
 
 #### end ####
